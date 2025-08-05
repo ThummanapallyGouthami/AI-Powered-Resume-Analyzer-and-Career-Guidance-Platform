@@ -4,7 +4,7 @@ import textwrap
 import re
 
 # 🔐 Gemini API key
-GEMINI_API_KEY = "AIzaSyAgY9m5mtHSdhs3LxHjVFi-SaAdgt0oZc0"
+GEMINI_API_KEY = ""
 
 # Configure Gemini
 try:
