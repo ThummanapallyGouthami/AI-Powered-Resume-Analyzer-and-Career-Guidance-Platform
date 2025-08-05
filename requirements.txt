@@ -1,0 +1,14 @@
+streamlit
+pandas
+numpy
+matplotlib
+scikit-learn
+nltk
+transformers
+sentencepiece
+google-generativeai
+graphviz
+docx2txt
+pdfplumber
+PyPDF2
+pymupdf
