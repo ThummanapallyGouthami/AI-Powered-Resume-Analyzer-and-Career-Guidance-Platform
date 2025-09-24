@@ -1,218 +1,187 @@
-
-import nltk
-
-# Download NLTK data safely
-for resource in ['punkt', 'stopwords']:
-    try:
-        nltk.data.find(f'tokenizers/{resource}' if resource == 'punkt' else f'corpora/{resource}')
-    except LookupError:
-        nltk.download(resource)
-
-import pandas as pd
-import numpy as np
 import streamlit as st
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import docx2txt
-import pdfplumber
+import pandas as pd
+import fitz  # PyMuPDF
 import re
-from nltk.corpus import stopwords
-from nltk.tokenize import RegexpTokenizer
+from difflib import get_close_matches
+from sentence_transformers import SentenceTransformer, util
 import matplotlib.pyplot as plt
-import warnings
+import numpy as np
 
-warnings.filterwarnings("ignore", category=UserWarning, module='matplotlib')
+# --- Load Sentence-BERT model once ---
+MODEL = SentenceTransformer('all-MiniLM-L6-v2')
 
-@st.cache_data
-def load_data():
-    return pd.read_csv("resume_analyzer\AI_Resume_Screening.csv")
+# --- Expanded predefined roles ---
+JOB_ROLE_DATA = {
+    "Data Scientist": {
+        "skills": ["Python", "R", "SQL", "Machine Learning", "Deep Learning", "Statistics", "Data Visualization"],
+        "tools": ["Pandas", "NumPy", "Scikit-learn", "TensorFlow", "Matplotlib"],
+        "certifications": ["IBM Data Science Professional Certificate", "Google Data Analytics Certificate"]
+    },
+    "Web Developer": {
+        "skills": ["HTML", "CSS", "JavaScript", "React", "Node.js", "REST APIs", "Responsive Design"],
+        "tools": ["VS Code", "Chrome DevTools", "Git", "Webpack"],
+        "certifications": ["Meta Front-End Developer", "freeCodeCamp Responsive Web Design"]
+    },
+    "AI Engineer": {
+        "skills": ["Python", "TensorFlow", "PyTorch", "Computer Vision", "NLP", "Model Deployment"],
+        "tools": ["TensorFlow", "PyTorch", "OpenCV", "Hugging Face Transformers"],
+        "certifications": ["TensorFlow Developer Certificate", "AI For Everyone by Andrew Ng"]
+    },
+    "ML Engineer": {
+        "skills": ["Python", "Scikit-learn", "Machine Learning", "Deep Learning", "Data Engineering"],
+        "tools": ["TensorFlow", "PyTorch", "Keras", "Airflow", "Docker"],
+        "certifications": ["AWS Machine Learning Specialty", "TensorFlow Developer Certificate"]
+    },
+    "Software Engineer": {
+        "skills": ["Java", "Python", "C++", "Algorithms", "Data Structures"],
+        "tools": ["Git", "VS Code", "Jira", "Docker"],
+        "certifications": ["Oracle Java Certification", "AWS Certified Developer"]
+    },
+    "DevOps Engineer": {
+        "skills": ["CI/CD", "Automation", "Cloud", "Docker", "Kubernetes"],
+        "tools": ["Jenkins", "Docker", "Kubernetes", "Terraform", "Git"],
+        "certifications": ["AWS DevOps Engineer", "Docker Certified Associate"]
+    },
+    "Cloud Engineer": {
+        "skills": ["AWS", "Azure", "GCP", "Networking", "Cloud Architecture"],
+        "tools": ["Terraform", "Ansible", "Kubernetes", "Docker"],
+        "certifications": ["AWS Solutions Architect", "Google Cloud Professional"]
+    },
+    "Cybersecurity Analyst": {
+        "skills": ["Network Security", "Penetration Testing", "Incident Response", "Threat Analysis"],
+        "tools": ["Wireshark", "Nmap", "Metasploit", "Splunk"],
+        "certifications": ["CEH", "CISSP", "CompTIA Security+"]
+    },
+    "Business Analyst": {
+        "skills": ["Requirement Analysis", "SQL", "Data Visualization", "Documentation"],
+        "tools": ["Excel", "Power BI", "Tableau", "Jira"],
+        "certifications": ["CBAP", "IIBA Certification"]
+    },
+    "Product Manager": {
+        "skills": ["Roadmap Planning", "Market Research", "User Stories", "Stakeholder Management"],
+        "tools": ["Jira", "Trello", "Aha!", "Miro"],
+        "certifications": ["Certified Scrum Product Owner", "PMP"]
+    },
+    "QA Engineer": {
+        "skills": ["Test Automation", "Manual Testing", "Selenium", "Performance Testing"],
+        "tools": ["Selenium", "Jira", "Postman", "TestRail"],
+        "certifications": ["ISTQB Foundation", "Certified Software Tester"]
+    }
+}
 
-def preprocess_text(text):
-    if not isinstance(text, str):
-        return ""
-    text = text.lower()
-    text = re.sub(r'[^\w\s]', '', text)
-    tokenizer = RegexpTokenizer(r'\w+')
-    tokens = tokenizer.tokenize(text)
-    stop_words = set(stopwords.words('english'))
-    filtered_tokens = [word for word in tokens if word not in stop_words]
-    return ' '.join(filtered_tokens)
-
-def extract_text_from_file(file):
+# --- Helper Functions ---
+def extract_text_from_pdf(uploaded_file):
     text = ""
-    if file.type == "application/pdf":
-        try:
-            with pdfplumber.open(file) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text
-        except Exception as e:
-            st.error(f"Error reading PDF: {e}")
-            return ""
-    elif file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-        try:
-            text = docx2txt.process(file)
-        except Exception as e:
-            st.error(f"Error reading DOCX: {e}")
-            return ""
-    return text
+    with fitz.open(stream=uploaded_file.read(), filetype="pdf") as doc:
+        for page in doc:
+            text += page.get_text()
+    return text.lower()
 
-def analyze_skills(resume_text, job_desc):
-    resume_skills = set(preprocess_text(resume_text).split())
-    job_skills = set(preprocess_text(job_desc).split())
-    matching_skills = job_skills & resume_skills
-    missing_skills = job_skills - resume_skills
-    match_percentage = len(matching_skills) / len(job_skills) * 100 if job_skills else 0
-    return {
-        "matching_skills": list(matching_skills),
-        "missing_skills": list(missing_skills),
-        "match_percentage": match_percentage,
-    }
-
-def analyze_experience(resume_text, required_exp):
-    exp_pattern = r'(\d+)\s*(years?|yrs?)'
-    matches = re.findall(exp_pattern, resume_text.lower())
-    resume_exp = max([int(m[0]) for m in matches]) if matches else 0
-    return {
-        "resume_experience": resume_exp,
-        "required_experience": required_exp,
-        "meets_requirement": resume_exp >= required_exp,
-    }
-
-def analyze_education(resume_text, required_degrees):
-    degree_keywords = ['bachelor', 'master', 'phd', 'mba', 'bsc', 'msc', 'b.tech', 'm.tech']
-    found_degrees = {word for word in degree_keywords if word in resume_text.lower()}
-    required_degrees_lower = {deg.lower() for deg in required_degrees}
-    return {
-        "found_degrees": list(found_degrees),
-        "required_degrees": required_degrees,
-        "meets_requirement": any(deg in found_degrees for deg in required_degrees_lower),
-    }
-
-def analyze_certifications(resume_text, required_certs):
-    required_certs = [cert for cert in required_certs if cert != 'None']
-    if not required_certs:
-        return {"found_certifications": [], "required_certifications": [], "meets_requirement": True}
-    found_certs = [cert for cert in required_certs if cert.lower() in resume_text.lower()]
-    return {
-        "found_certifications": found_certs,
-        "required_certifications": required_certs,
-        "meets_requirement": len(found_certs) >= len(required_certs),
-    }
-
-def calculate_similarity(resume_text, job_desc):
-    processed_resume = preprocess_text(resume_text)
-    processed_job_desc = preprocess_text(job_desc)
-    if not processed_resume or not processed_job_desc:
-        return 0.0
-    vectorizer = TfidfVectorizer()
-    try:
-        vectors = vectorizer.fit_transform([processed_resume, processed_job_desc])
-        return cosine_similarity(vectors[0], vectors[1])[0][0] * 100
-    except ValueError:
-        return 0.0
-
-def generate_visualizations(analysis_results):
-    plt.style.use('seaborn-v0_8-talk')
-    figs = []
-
-    skills_data = {
-        "Matched": len(analysis_results["skills_analysis"]["matching_skills"]),
-        "Missing": len(analysis_results["skills_analysis"]["missing_skills"])
-    }
-    fig, ax = plt.subplots()
-    ax.bar(skills_data.keys(), skills_data.values(), color=['#2ecc71', '#e74c3c'])
-    ax.set_title("Skills Match", fontsize=16)
-    ax.set_ylabel("Count")
-    figs.append(fig)
-
-    exp_data = {
-        "Resume": analysis_results["experience_analysis"]["resume_experience"],
-        "Required": analysis_results["experience_analysis"]["required_experience"]
-    }
-    fig, ax = plt.subplots()
-    ax.bar(exp_data.keys(), exp_data.values(), color=['#3498db', '#f39c12'])
-    ax.set_title("Experience Comparison", fontsize=16)
-    ax.set_ylabel("Years")
-    figs.append(fig)
-
-    return figs
-
-def main():
-    st.set_page_config(layout="wide", page_title="AI Resume Analyzer")
-    st.title("📄 AI Resume Analyzer")
-
-    st.write("Upload a resume and select a job role to see the match analysis.")
-
-    try:
-        df = load_data()
-    except FileNotFoundError:
-        st.error("Error: `AI_Resume_Screening.csv` not found. Please upload it.")
-        return
-
-    with st.sidebar:
-        st.header("Inputs")
-        job_options = list(df['Job Role'].unique())
-        job_title = st.selectbox("Select Job Role", job_options)
-        sample_job = df[df['Job Role'] == job_title].iloc[0]
-
-        job_desc_default = f"Required Skills: {sample_job.get('Skills', '')}\nRequired Experience: {sample_job.get('Experience (Years)', 0)} years\nRequired Education: {sample_job.get('Education', '')}"
-        job_desc = st.text_area("Job Description", value=job_desc_default, height=200)
-
-        uploaded_file = st.file_uploader("Upload Your Resume", type=["pdf", "docx"])
-
-        st.header("Refine Requirements")
-        required_experience = st.slider("Required Experience (Years)", 0, 20, int(sample_job['Experience (Years)']))
-
-        edu_opts = ['B.Sc', 'B.Tech', 'MBA', 'M.Tech', 'PhD']
-        def_edu = [e for e in [sample_job['Education']] if e in edu_opts]
-        required_degrees = st.multiselect("Required Education", edu_opts, default=def_edu)
-
-        cert_opts = ['AWS Certified', 'Google ML', 'Deep Learning Specialization', 'None']
-        def_certs = [c for c in [sample_job['Certifications']] if pd.notna(c) and c in cert_opts]
-        required_certifications = st.multiselect("Required Certifications", cert_opts, default=def_certs)
-
-    if st.sidebar.button("Analyze Resume", use_container_width=True):
-        if uploaded_file:
-            with st.spinner("Analyzing... please wait."):
-                resume_text = extract_text_from_file(uploaded_file)
-                if resume_text:
-                    analysis = {
-                        "skills_analysis": analyze_skills(resume_text, job_desc),
-                        "experience_analysis": analyze_experience(resume_text, required_experience),
-                        "education_analysis": analyze_education(resume_text, required_degrees),
-                        "certification_analysis": analyze_certifications(resume_text, required_certifications),
-                        "similarity_score": calculate_similarity(resume_text, job_desc),
-                    }
-
-                    st.header("Analysis Dashboard")
-                    st.metric("Overall Match Score", f"{analysis['similarity_score']:.1f}%")
-
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.subheader("Visual Summary")
-                        figs = generate_visualizations(analysis)
-                        for fig in figs:
-                            st.pyplot(fig)
-
-                    with col2:
-                        st.subheader("Requirements Check")
-                        st.success(f"**Experience:** {'Met' if analysis['experience_analysis']['meets_requirement'] else 'Not Met'}")
-                        st.success(f"**Education:** {'Met' if analysis['education_analysis']['meets_requirement'] else 'Not Met'}")
-                        st.success(f"**Certifications:** {'Met' if analysis['certification_analysis']['meets_requirement'] else 'Not Met'}")
-
-                        with st.expander("Skills Breakdown"):
-                            st.write(f"**Matching Skills:** {', '.join(analysis['skills_analysis']['matching_skills'])}")
-                            st.write(f"**Missing Skills:** {', '.join(analysis['skills_analysis']['missing_skills'])}")
-
-                        with st.expander("Education Breakdown"):
-                            st.write(f"**Required:** {', '.join(analysis['education_analysis']['required_degrees'])}")
-                            st.write(f"**Found:** {', '.join(analysis['education_analysis']['found_degrees'])}")
-                else:
-                    st.error("Could not extract text from the resume.")
+def extract_items_from_text(text, item_list):
+    found_items = []
+    for item in item_list:
+        pattern = r"\b" + re.escape(item.lower()) + r"\b"
+        if re.search(pattern, text):
+            found_items.append(item)
         else:
-            st.warning("Please upload a resume before analyzing.")
+            close_matches = get_close_matches(item.lower(), text.split(), n=1, cutoff=0.8)
+            if close_matches:
+                found_items.append(item)
+    return found_items
 
-if __name__ == '__main__':
+def calculate_match(extracted, required):
+    matched = set(extracted) & set(required)
+    return len(matched)/len(required)*100 if required else 0
+
+def calculate_semantic_similarity(text1, text2):
+    emb1 = MODEL.encode(text1)
+    emb2 = MODEL.encode(text2)
+    sim = util.cos_sim(emb1, emb2).item()
+    return sim * 100
+
+def top_3_suggestions(missing_skills, missing_tools, missing_certs):
+    suggestions = missing_skills + missing_tools + missing_certs
+    return suggestions[:3] if suggestions else ["No suggestions, resume is strong!"]
+
+# --- Main Streamlit App ---
+def main():
+    st.set_page_config(page_title="AI Resume Analyzer", layout="wide")
+    st.title("📄 AI-Powered Resume Analyzer & Advisor")
+
+    # --- Only Predefined Role Selection ---
+    selected_role = st.selectbox("Select a job role", list(JOB_ROLE_DATA.keys()))
+
+    uploaded_file = st.file_uploader("Upload your resume (PDF)", type=["pdf"])
+
+    if uploaded_file and selected_role:
+        resume_text = extract_text_from_pdf(uploaded_file)
+
+        job_data = JOB_ROLE_DATA[selected_role]
+
+        # --- Extract items ---
+        extracted_skills = extract_items_from_text(resume_text, job_data["skills"])
+        extracted_tools = extract_items_from_text(resume_text, job_data["tools"])
+        extracted_certs = extract_items_from_text(resume_text, job_data["certifications"])
+
+        # --- Match Scores ---
+        skill_score = calculate_match(extracted_skills, job_data["skills"])
+        tool_score = calculate_match(extracted_tools, job_data["tools"])
+        cert_score = calculate_match(extracted_certs, job_data["certifications"])
+        semantic_score = calculate_semantic_similarity(
+            resume_text, " ".join(job_data["skills"] + job_data["tools"] + job_data["certifications"])
+        )
+
+        overall_score = 0.4*skill_score + 0.2*tool_score + 0.1*cert_score + 0.3*semantic_score
+
+        st.subheader("📈 Match Scores")
+        scores_df = pd.DataFrame({
+            "Category": ["Skills", "Tools", "Certifications", "Semantic"],
+            "Score (%)": [skill_score, tool_score, cert_score, semantic_score]
+        })
+        st.bar_chart(scores_df.set_index("Category"))
+        st.success(f"💡 Overall Resume Match Score: {overall_score:.2f}%")
+
+        # --- Suggestions ---
+        missing_skills = [s for s in job_data["skills"] if s not in extracted_skills]
+        missing_tools = [t for t in job_data["tools"] if t not in extracted_tools]
+        missing_certs = [c for c in job_data["certifications"] if c not in extracted_certs]
+
+        st.subheader("📌 Suggestions for Improvement")
+        if missing_skills or missing_tools or missing_certs:
+            if missing_skills: st.write(f"**Missing Skills:** {', '.join(missing_skills)}")
+            if missing_tools: st.write(f"**Missing Tools:** {', '.join(missing_tools)}")
+            if missing_certs: st.write(f"**Missing Certifications:** {', '.join(missing_certs)}")
+        else:
+            st.success("✅ Your resume covers all key requirements!")
+
+        # --- Top 3 Recommendations ---
+        st.subheader("💡 Top 3 Recommendations")
+        for idx, suggestion in enumerate(top_3_suggestions(missing_skills, missing_tools, missing_certs), 1):
+            st.write(f"{idx}. {suggestion}")
+
+        # --- Resume Verdict ---
+        st.subheader("📝 Resume Verdict / Hiring Suggestion")
+        if overall_score >= 80:
+            st.success("✅ Excellent! Your resume is likely to be accepted for this role.")
+        elif overall_score >= 60:
+            st.warning("⚠️ Moderate match. Improvements recommended.")
+        else:
+            st.error("❌ Weak match. Resume unlikely to be accepted.")
+
+        # --- Radar Chart ---
+        st.subheader("📊 Skill Coverage Radar")
+        categories = job_data["skills"]
+        values = [1 if skill in extracted_skills else 0 for skill in categories]
+        values += values[:1]
+        categories += categories[:1]
+
+        angles = np.linspace(0, 2*np.pi, len(categories), endpoint=False).tolist()
+        fig, ax = plt.subplots(figsize=(6,6), subplot_kw=dict(polar=True))
+        ax.plot(angles, values, 'o-', linewidth=2)
+        ax.fill(angles, values, alpha=0.25)
+        ax.set_thetagrids(np.degrees(angles), categories)
+        ax.set_ylim(0,1)
+        st.pyplot(fig)
+
+if __name__ == "__main__":
     main()
